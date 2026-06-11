@@ -1,7 +1,5 @@
-fastapi
-uvicorn
-python-multipart
-face_recognition
-cloudinary
-bcrypt
-requests
+fastapi==0.111.0
+uvicorn==0.29.0
+python-multipart==0.0.9
+requests==2.31.0
+cloudinary==1.40.0
