@@ -318,15 +318,9 @@ async def guest_search(event_id: str = Form(...), selfie: UploadFile = File(...)
 
     selfie_bytes = await selfie.read()
     # Compress if > 1.5MB
-    if len(selfie_bytes) > 1500000:
-        import io
-        from PIL import Image
-        img = Image.open(io.BytesIO(selfie_bytes))
-        img = img.convert("RGB")
-        output = io.BytesIO()
-        img.save(output, format="JPEG", quality=60)
-        selfie_bytes = output.getvalue()
-        print(f"Compressed to: {len(selfie_bytes)} bytes")
+   if len(selfie_bytes) > 2000000:
+        selfie_bytes = selfie_bytes[:2000000]
+        print(f"Truncated to: {len(selfie_bytes)} bytes")
 
     try:
         matched_face_tokens = facepp_search(faceset_token, selfie_bytes)
