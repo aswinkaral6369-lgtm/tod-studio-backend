@@ -1,5 +1,4 @@
 import os
-import sqlite3
 import uuid
 import requests
 import io
@@ -10,6 +9,8 @@ from fastapi.middleware.cors import CORSMiddleware
 import cloudinary
 import cloudinary.api
 import cloudinary.uploader
+import psycopg2
+from psycopg2 import IntegrityError
 
 app = FastAPI(title="WinLens Backend")
 
@@ -20,18 +21,25 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-DB_FILE = "todostudio_v2.db"
 TEMP_FOLDER = "temp_processing"
 FACEPP_API_KEY = os.environ.get("FACEPP_API_KEY", "")
 FACEPP_API_SECRET = os.environ.get("FACEPP_API_SECRET", "")
 FACEPP_BASE = "https://api-us.faceplusplus.com/facepp/v3"
+DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
 if not os.path.exists(TEMP_FOLDER):
     os.makedirs(TEMP_FOLDER)
 
+def get_db_connection():
+    if not DATABASE_URL:
+        raise Exception("DATABASE_URL is not set!")
+    return psycopg2.connect(DATABASE_URL)
 
 def init_db():
-    conn = sqlite3.connect(DB_FILE)
+    if not DATABASE_URL:
+        print("Waiting for DATABASE_URL...")
+        return
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS studios (
@@ -72,42 +80,30 @@ init_db()
 
 
 def compress_image(file_bytes: bytes, max_bytes: int = 500000) -> bytes:
-    """Properly compress image using Pillow to stay within Face++ 2MB limit."""
     if len(file_bytes) <= max_bytes:
         return file_bytes
-
     try:
         img = Image.open(io.BytesIO(file_bytes))
-        img = img.convert("RGB")  # Remove alpha channel if any (PNG, WEBP etc.)
-
-        # Resize if dimensions are too large
-        max_size = (1920, 1920)
-        img.thumbnail(max_size, Image.LANCZOS)
-
-        # Reduce quality until under limit
+        img = img.convert("RGB")
+        img.thumbnail((1920, 1920), Image.LANCZOS)
         quality = 85
         while quality >= 20:
             output = io.BytesIO()
             img.save(output, format="JPEG", quality=quality)
             compressed = output.getvalue()
-            print(f"Compressed at quality={quality}: {len(compressed)} bytes")
             if len(compressed) <= max_bytes:
                 return compressed
             quality -= 10
-
-        # Last resort: resize further
         img.thumbnail((800, 800), Image.LANCZOS)
         output = io.BytesIO()
         img.save(output, format="JPEG", quality=60)
         return output.getvalue()
-
     except Exception as e:
         print(f"Image compression error: {e}")
-        return file_bytes  # Return original if compression fails
+        return file_bytes
 
 
 def facepp_create_faceset(event_id: str) -> str:
-    print(f"Creating FaceSet for event: {event_id}")
     res = requests.post(f"{FACEPP_BASE}/faceset/create", data={
         "api_key": FACEPP_API_KEY,
         "api_secret": FACEPP_API_SECRET,
@@ -115,22 +111,18 @@ def facepp_create_faceset(event_id: str) -> str:
         "display_name": event_id
     })
     data = res.json()
-    print(f"FaceSet create response: {data}")
     if "faceset_token" not in data:
         raise HTTPException(status_code=500, detail=f"FaceSet create failed: {data}")
     return data["faceset_token"]
 
 
 def facepp_detect_faces(image_url: str) -> list:
-    print(f"Detecting faces in: {image_url}")
-    print(f"Using API key: {FACEPP_API_KEY[:8]}..." if FACEPP_API_KEY else "NO API KEY!")
     res = requests.post(f"{FACEPP_BASE}/detect", data={
         "api_key": FACEPP_API_KEY,
         "api_secret": FACEPP_API_SECRET,
         "image_url": image_url
     })
     data = res.json()
-    print(f"FACEPP DETECT RESPONSE: {data}")
     return [f["face_token"] for f in data.get("faces", [])]
 
 
@@ -145,7 +137,6 @@ def facepp_add_to_faceset(faceset_token: str, face_tokens: list, retries=3):
             "face_tokens": ",".join(face_tokens)
         })
         data = res.json()
-        print(f"AddFace response: {data}")
         if "error_message" not in data:
             return data
         if data.get("error_message") == "CONCURRENCY_LIMIT_EXCEEDED":
@@ -156,12 +147,7 @@ def facepp_add_to_faceset(faceset_token: str, face_tokens: list, retries=3):
 
 
 def facepp_search(faceset_token: str, file_bytes: bytes) -> list:
-    print(f"Searching faceset: {faceset_token}, original image size: {len(file_bytes)} bytes")
-
-    # Properly compress instead of raw truncation
     file_bytes = compress_image(file_bytes)
-    print(f"Final image size for Face++ search: {len(file_bytes)} bytes")
-
     res = requests.post(
         f"{FACEPP_BASE}/search",
         data={
@@ -173,7 +159,6 @@ def facepp_search(faceset_token: str, file_bytes: bytes) -> list:
         files={"image_file": ("selfie.jpg", file_bytes, "image/jpeg")}
     )
     data = res.json()
-    print(f"FACEPP SEARCH RESPONSE: {data}")
     results = data.get("results", [])
     matched = [r["face_token"] for r in results if r.get("confidence", 0) >= 60]
     return matched
@@ -191,17 +176,17 @@ async def register_studio(
     api_key: str = Form(...),
     api_secret: str = Form(...)
 ):
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db_connection()
     cursor = conn.cursor()
     studio_id = f"studio_{uuid.uuid4().hex[:8]}"
     try:
         cursor.execute(
-            "INSERT INTO studios (id, name, email, password, cloud_name, api_key, api_secret) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO studios (id, name, email, password, cloud_name, api_key, api_secret) VALUES (%s, %s, %s, %s, %s, %s, %s)",
             (studio_id, name, email, password, cloud_name, api_key, api_secret)
         )
         conn.commit()
         return {"status": "success", "studio_id": studio_id}
-    except sqlite3.IntegrityError:
+    except IntegrityError:
         raise HTTPException(status_code=400, detail="Email already exists")
     finally:
         conn.close()
@@ -209,9 +194,9 @@ async def register_studio(
 
 @app.post("/api/studio/login")
 async def studio_login(email: str = Form(...), password: str = Form(...)):
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT id, name FROM studios WHERE email=? AND password=?", (email, password))
+    cursor.execute("SELECT id, name FROM studios WHERE email=%s AND password=%s", (email, password))
     studio = cursor.fetchone()
     conn.close()
     if not studio:
@@ -221,9 +206,9 @@ async def studio_login(email: str = Form(...), password: str = Form(...)):
 
 @app.get("/api/studio/events/{studio_id}")
 async def get_studio_events(studio_id: str):
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT id, name, client_email FROM events WHERE studio_id=?", (studio_id,))
+    cursor.execute("SELECT id, name, client_email FROM events WHERE studio_id=%s", (studio_id,))
     events = cursor.fetchall()
     conn.close()
     return {
@@ -243,16 +228,16 @@ async def create_event(
     cloudinary_prefix = f"todostudio_events/{event_id}"
     faceset_token = facepp_create_faceset(event_id)
 
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db_connection()
     cursor = conn.cursor()
     try:
         cursor.execute(
-            "INSERT INTO events (id, studio_id, name, client_email, client_password, cloudinary_prefix, faceset_token) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO events (id, studio_id, name, client_email, client_password, cloudinary_prefix, faceset_token) VALUES (%s, %s, %s, %s, %s, %s, %s)",
             (event_id, studio_id, event_name, client_email, client_password, cloudinary_prefix, faceset_token)
         )
         conn.commit()
         return {"status": "success", "event_id": event_id}
-    except sqlite3.IntegrityError:
+    except IntegrityError:
         raise HTTPException(status_code=400, detail="Client email already used")
     finally:
         conn.close()
@@ -260,13 +245,13 @@ async def create_event(
 
 @app.post("/api/studio/upload-photo")
 async def upload_photo(event_id: str = Form(...), file: UploadFile = File(...)):
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute('''
         SELECT e.cloudinary_prefix, e.faceset_token,
                s.cloud_name, s.api_key, s.api_secret
         FROM events e JOIN studios s ON e.studio_id = s.id
-        WHERE e.id = ?
+        WHERE e.id = %s
     ''', (event_id,))
     row = cursor.fetchone()
     conn.close()
@@ -294,11 +279,11 @@ async def upload_photo(event_id: str = Form(...), file: UploadFile = File(...)):
         faces_count = len(face_tokens)
         if face_tokens:
             facepp_add_to_faceset(faceset_token, face_tokens)
-            conn = sqlite3.connect(DB_FILE)
+            conn = get_db_connection()
             cursor = conn.cursor()
             for ft in face_tokens:
                 cursor.execute(
-                    "INSERT INTO photo_faces (id, event_id, photo_url, face_token) VALUES (?, ?, ?, ?)",
+                    "INSERT INTO photo_faces (id, event_id, photo_url, face_token) VALUES (%s, %s, %s, %s)",
                     (uuid.uuid4().hex, event_id, photo_url, ft)
                 )
             conn.commit()
@@ -311,13 +296,11 @@ async def upload_photo(event_id: str = Form(...), file: UploadFile = File(...)):
 
 @app.delete("/api/studio/events/{event_id}")
 async def delete_event(event_id: str):
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db_connection()
     cursor = conn.cursor()
     try:
-        # First, delete associated face data (foreign key constraint)
-        cursor.execute("DELETE FROM photo_faces WHERE event_id=?", (event_id,))
-        # Then, delete the main event
-        cursor.execute("DELETE FROM events WHERE id=?", (event_id,))
+        cursor.execute("DELETE FROM photo_faces WHERE event_id=%s", (event_id,))
+        cursor.execute("DELETE FROM events WHERE id=%s", (event_id,))
         conn.commit()
         return {"status": "success", "message": "Event deleted successfully"}
     except Exception as e:
@@ -332,10 +315,10 @@ async def delete_event(event_id: str):
 
 @app.post("/api/client/login")
 async def client_login(email: str = Form(...), password: str = Form(...)):
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute(
-        "SELECT id, name FROM events WHERE client_email=? AND client_password=?",
+        "SELECT id, name FROM events WHERE client_email=%s AND client_password=%s",
         (email, password)
     )
     event = cursor.fetchone()
@@ -347,11 +330,11 @@ async def client_login(email: str = Form(...), password: str = Form(...)):
 
 @app.get("/api/client/all-photos/{event_id}")
 async def get_all_photos(event_id: str):
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute('''
         SELECT e.cloudinary_prefix, s.cloud_name, s.api_key, s.api_secret
-        FROM events e JOIN studios s ON e.studio_id = s.id WHERE e.id = ?
+        FROM events e JOIN studios s ON e.studio_id = s.id WHERE e.id = %s
     ''', (event_id,))
     row = cursor.fetchone()
     conn.close()
@@ -366,9 +349,9 @@ async def get_all_photos(event_id: str):
 
 @app.post("/api/guest/search")
 async def guest_search(event_id: str = Form(...), selfie: UploadFile = File(...)):
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT faceset_token FROM events WHERE id=?", (event_id,))
+    cursor.execute("SELECT faceset_token FROM events WHERE id=%s", (event_id,))
     row = cursor.fetchone()
     conn.close()
     if not row or not row[0]:
@@ -385,11 +368,11 @@ async def guest_search(event_id: str = Form(...), selfie: UploadFile = File(...)
     if not matched_face_tokens:
         return {"status": "success", "photos": []}
 
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db_connection()
     cursor = conn.cursor()
-    placeholders = ",".join("?" * len(matched_face_tokens))
+    placeholders = ",".join(["%s"] * len(matched_face_tokens))
     cursor.execute(
-        f"SELECT DISTINCT photo_url FROM photo_faces WHERE event_id=? AND face_token IN ({placeholders})",
+        f"SELECT DISTINCT photo_url FROM photo_faces WHERE event_id=%s AND face_token IN ({placeholders})",
         [event_id] + matched_face_tokens
     )
     photo_urls = [r[0] for r in cursor.fetchall()]
