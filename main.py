@@ -3,6 +3,7 @@ import sqlite3
 import uuid
 import requests
 import io
+import time
 from PIL import Image
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -10,7 +11,7 @@ import cloudinary
 import cloudinary.api
 import cloudinary.uploader
 
-app = FastAPI(title="Todo Studio Premium B2B SaaS")
+app = FastAPI(title="WinLens Backend")
 
 app.add_middleware(
     CORSMiddleware,
@@ -133,8 +134,6 @@ def facepp_detect_faces(image_url: str) -> list:
     return [f["face_token"] for f in data.get("faces", [])]
 
 
-import time
-
 def facepp_add_to_faceset(faceset_token: str, face_tokens: list, retries=3):
     if not face_tokens:
         return
@@ -179,6 +178,9 @@ def facepp_search(faceset_token: str, file_bytes: bytes) -> list:
     matched = [r["face_token"] for r in results if r.get("confidence", 0) >= 60]
     return matched
 
+# ==========================================
+# STUDIO API ROUTES
+# ==========================================
 
 @app.post("/api/studio/register")
 async def register_studio(
@@ -306,6 +308,27 @@ async def upload_photo(event_id: str = Form(...), file: UploadFile = File(...)):
 
     return {"status": "success", "url": photo_url, "faces_detected": faces_count}
 
+
+@app.delete("/api/studio/events/{event_id}")
+async def delete_event(event_id: str):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    try:
+        # First, delete associated face data (foreign key constraint)
+        cursor.execute("DELETE FROM photo_faces WHERE event_id=?", (event_id,))
+        # Then, delete the main event
+        cursor.execute("DELETE FROM events WHERE id=?", (event_id,))
+        conn.commit()
+        return {"status": "success", "message": "Event deleted successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        conn.close()
+
+
+# ==========================================
+# CLIENT & GUEST API ROUTES
+# ==========================================
 
 @app.post("/api/client/login")
 async def client_login(email: str = Form(...), password: str = Form(...)):
