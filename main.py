@@ -123,9 +123,11 @@ def facepp_add_to_faceset(faceset_token: str, face_tokens: list):
     print(f"AddFace response: {data}")
     return data
 
-
 def facepp_search(faceset_token: str, file_bytes: bytes) -> list:
-    print(f"Searching faceset: {faceset_token}")
+    print(f"Searching faceset: {faceset_token}, image size: {len(file_bytes)} bytes")
+    if len(file_bytes) < 1000:
+        print("Image too small!")
+        return []
     res = requests.post(f"{FACEPP_BASE}/search",
         data={
             "api_key": FACEPP_API_KEY,
