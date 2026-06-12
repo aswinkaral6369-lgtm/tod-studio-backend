@@ -70,7 +70,7 @@ def init_db():
 init_db()
 
 
-def compress_image(file_bytes: bytes, max_bytes: int = 1900000) -> bytes:
+def compress_image(file_bytes: bytes, max_bytes: int = 500000) -> bytes:
     """Properly compress image using Pillow to stay within Face++ 2MB limit."""
     if len(file_bytes) <= max_bytes:
         return file_bytes
