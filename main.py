@@ -2,6 +2,8 @@ import os
 import sqlite3
 import uuid
 import requests
+import io
+from PIL import Image
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import cloudinary
@@ -68,6 +70,41 @@ def init_db():
 init_db()
 
 
+def compress_image(file_bytes: bytes, max_bytes: int = 1900000) -> bytes:
+    """Properly compress image using Pillow to stay within Face++ 2MB limit."""
+    if len(file_bytes) <= max_bytes:
+        return file_bytes
+
+    try:
+        img = Image.open(io.BytesIO(file_bytes))
+        img = img.convert("RGB")  # Remove alpha channel if any (PNG, WEBP etc.)
+
+        # Resize if dimensions are too large
+        max_size = (1920, 1920)
+        img.thumbnail(max_size, Image.LANCZOS)
+
+        # Reduce quality until under limit
+        quality = 85
+        while quality >= 20:
+            output = io.BytesIO()
+            img.save(output, format="JPEG", quality=quality)
+            compressed = output.getvalue()
+            print(f"Compressed at quality={quality}: {len(compressed)} bytes")
+            if len(compressed) <= max_bytes:
+                return compressed
+            quality -= 10
+
+        # Last resort: resize further
+        img.thumbnail((800, 800), Image.LANCZOS)
+        output = io.BytesIO()
+        img.save(output, format="JPEG", quality=60)
+        return output.getvalue()
+
+    except Exception as e:
+        print(f"Image compression error: {e}")
+        return file_bytes  # Return original if compression fails
+
+
 def facepp_create_faceset(event_id: str) -> str:
     print(f"Creating FaceSet for event: {event_id}")
     res = requests.post(f"{FACEPP_BASE}/faceset/create", data={
@@ -111,10 +148,12 @@ def facepp_add_to_faceset(faceset_token: str, face_tokens: list):
 
 
 def facepp_search(faceset_token: str, file_bytes: bytes) -> list:
-    print(f"Searching faceset: {faceset_token}, image size: {len(file_bytes)} bytes")
-    if len(file_bytes) > 2000000:
-        file_bytes = file_bytes[:2000000]
-        print(f"Truncated to: {len(file_bytes)} bytes")
+    print(f"Searching faceset: {faceset_token}, original image size: {len(file_bytes)} bytes")
+
+    # Properly compress instead of raw truncation
+    file_bytes = compress_image(file_bytes)
+    print(f"Final image size for Face++ search: {len(file_bytes)} bytes")
+
     res = requests.post(
         f"{FACEPP_BASE}/search",
         data={
