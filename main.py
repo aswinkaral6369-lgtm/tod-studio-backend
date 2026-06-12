@@ -8,7 +8,7 @@ import cloudinary
 import cloudinary.api
 import cloudinary.uploader
 
-app = FastAPI(title="Todo Studio Premium B2B SaaS")
+app = FastAPI(title="WinLens Studio Premium B2B SaaS")
 
 app.add_middleware(
     CORSMiddleware,
@@ -17,7 +17,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-DB_FILE = "todostudio_v2.db"
+DB_FILE = "winlens_v2.db"
 TEMP_FOLDER = "temp_processing"
 FACEPP_API_KEY = os.environ.get("FACEPP_API_KEY", "")
 FACEPP_API_SECRET = os.environ.get("FACEPP_API_SECRET", "")
@@ -97,6 +97,14 @@ def facepp_detect_faces(image_url: str) -> list:
         "image_url": image_url
     })
     data = res.json()
+
+    # --- PUDHU CODE: ERROR CHECKING ---
+    # Face++ ethavathu error anuppirukka nu inga theliva check pannum
+    if "error_message" in data:
+        print(f"🚨 FACE++ ERROR: {data['error_message']}") # Render Log-la print aagum
+        raise Exception(f"Face++ AI Failed: {data['error_message']}")
+    # ----------------------------------
+
     return [f["face_token"] for f in data.get("faces", [])]
 
 
@@ -205,7 +213,7 @@ async def create_event(
     client_password: str = Form(...)
 ):
     event_id = f"event_{uuid.uuid4().hex[:8]}"
-    cloudinary_prefix = f"todostudio_events/{event_id}"
+    cloudinary_prefix = f"winlensstudio_events/{event_id}"
 
     # Create Face++ FaceSet for this event
     faceset_token = facepp_create_faceset(event_id)
