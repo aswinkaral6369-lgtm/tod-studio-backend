@@ -96,20 +96,6 @@ def facepp_detect_faces(image_url: str) -> list:
     return [f["face_token"] for f in data.get("faces", [])]
 
 
-def facepp_detect_from_file(file_bytes: bytes) -> list:
-    print("Detecting faces from selfie file...")
-    res = requests.post(f"{FACEPP_BASE}/detect",
-        data={
-            "api_key": FACEPP_API_KEY,
-            "api_secret": FACEPP_API_SECRET,
-        },
-        files={"image_file": ("selfie.jpg", file_bytes, "image/jpeg")}
-    )
-    data = res.json()
-    print(f"FACEPP SELFIE DETECT: {data}")
-    return [f["face_token"] for f in data.get("faces", [])]
-
-
 def facepp_add_to_faceset(faceset_token: str, face_tokens: list):
     if not face_tokens:
         return
@@ -123,12 +109,14 @@ def facepp_add_to_faceset(faceset_token: str, face_tokens: list):
     print(f"AddFace response: {data}")
     return data
 
+
 def facepp_search(faceset_token: str, file_bytes: bytes) -> list:
     print(f"Searching faceset: {faceset_token}, image size: {len(file_bytes)} bytes")
-    if len(file_bytes) < 1000:
-        print("Image too small!")
-        return []
-    res = requests.post(f"{FACEPP_BASE}/search",
+    if len(file_bytes) > 2000000:
+        file_bytes = file_bytes[:2000000]
+        print(f"Truncated to: {len(file_bytes)} bytes")
+    res = requests.post(
+        f"{FACEPP_BASE}/search",
         data={
             "api_key": FACEPP_API_KEY,
             "api_secret": FACEPP_API_SECRET,
@@ -317,10 +305,6 @@ async def guest_search(event_id: str = Form(...), selfie: UploadFile = File(...)
     faceset_token = row[0]
 
     selfie_bytes = await selfie.read()
-    # Compress if > 1.5MB
-   if len(selfie_bytes) > 2000000:
-        selfie_bytes = selfie_bytes[:2000000]
-        print(f"Truncated to: {len(selfie_bytes)} bytes")
 
     try:
         matched_face_tokens = facepp_search(faceset_token, selfie_bytes)
