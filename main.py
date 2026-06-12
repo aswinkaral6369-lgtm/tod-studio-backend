@@ -133,17 +133,26 @@ def facepp_detect_faces(image_url: str) -> list:
     return [f["face_token"] for f in data.get("faces", [])]
 
 
-def facepp_add_to_faceset(faceset_token: str, face_tokens: list):
+import time
+
+def facepp_add_to_faceset(faceset_token: str, face_tokens: list, retries=3):
     if not face_tokens:
         return
-    res = requests.post(f"{FACEPP_BASE}/faceset/addface", data={
-        "api_key": FACEPP_API_KEY,
-        "api_secret": FACEPP_API_SECRET,
-        "faceset_token": faceset_token,
-        "face_tokens": ",".join(face_tokens)
-    })
-    data = res.json()
-    print(f"AddFace response: {data}")
+    for attempt in range(retries):
+        res = requests.post(f"{FACEPP_BASE}/faceset/addface", data={
+            "api_key": FACEPP_API_KEY,
+            "api_secret": FACEPP_API_SECRET,
+            "faceset_token": faceset_token,
+            "face_tokens": ",".join(face_tokens)
+        })
+        data = res.json()
+        print(f"AddFace response: {data}")
+        if "error_message" not in data:
+            return data
+        if data.get("error_message") == "CONCURRENCY_LIMIT_EXCEEDED":
+            time.sleep(2)
+            continue
+        return data
     return data
 
 
