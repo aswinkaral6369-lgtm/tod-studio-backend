@@ -160,7 +160,7 @@ def facepp_search(faceset_token: str, file_bytes: bytes) -> list:
             "api_key": FACEPP_API_KEY,
             "api_secret": FACEPP_API_SECRET,
             "faceset_token": faceset_token,
-            "return_result_count": 10
+            "return_result_count": 5
         },
         files={"image_file": ("selfie.jpg", file_bytes, "image/jpeg")}
     )
