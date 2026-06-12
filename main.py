@@ -8,7 +8,7 @@ import cloudinary
 import cloudinary.api
 import cloudinary.uploader
 
-app = FastAPI(title="WinLens Studio Premium B2B SaaS")
+app = FastAPI(title="Todo Studio Premium B2B SaaS")
 
 app.add_middleware(
     CORSMiddleware,
@@ -17,7 +17,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-DB_FILE = "winlens_v2.db"
+DB_FILE = "todostudio_v2.db"
 TEMP_FOLDER = "temp_processing"
 FACEPP_API_KEY = os.environ.get("FACEPP_API_KEY", "")
 FACEPP_API_SECRET = os.environ.get("FACEPP_API_SECRET", "")
@@ -27,9 +27,6 @@ if not os.path.exists(TEMP_FOLDER):
     os.makedirs(TEMP_FOLDER)
 
 
-# ─────────────────────────────────────────
-# DATABASE INIT
-# ─────────────────────────────────────────
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
@@ -56,7 +53,6 @@ def init_db():
             FOREIGN KEY(studio_id) REFERENCES studios(id)
         )
     ''')
-    # photo url <-> face_token mapping
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS photo_faces (
             id TEXT PRIMARY KEY,
@@ -72,11 +68,8 @@ def init_db():
 init_db()
 
 
-# ─────────────────────────────────────────
-# FACE++ HELPERS
-# ─────────────────────────────────────────
 def facepp_create_faceset(event_id: str) -> str:
-    """Create a FaceSet for this event, return faceset_token"""
+    print(f"Creating FaceSet for event: {event_id}")
     res = requests.post(f"{FACEPP_BASE}/faceset/create", data={
         "api_key": FACEPP_API_KEY,
         "api_secret": FACEPP_API_SECRET,
@@ -84,33 +77,27 @@ def facepp_create_faceset(event_id: str) -> str:
         "display_name": event_id
     })
     data = res.json()
+    print(f"FaceSet create response: {data}")
     if "faceset_token" not in data:
         raise HTTPException(status_code=500, detail=f"FaceSet create failed: {data}")
     return data["faceset_token"]
 
 
 def facepp_detect_faces(image_url: str) -> list:
+    print(f"Detecting faces in: {image_url}")
+    print(f"Using API key: {FACEPP_API_KEY[:8]}..." if FACEPP_API_KEY else "NO API KEY!")
     res = requests.post(f"{FACEPP_BASE}/detect", data={
         "api_key": FACEPP_API_KEY,
         "api_secret": FACEPP_API_SECRET,
         "image_url": image_url
     })
     data = res.json()
-    print(f"FACEPP DETECT RESPONSE: {data}")  # debug
-    return [f["face_token"] for f in data.get("faces", [])]
-
-    # --- PUDHU CODE: ERROR CHECKING ---
-    # Face++ ethavathu error anuppirukka nu inga theliva check pannum
-    if "error_message" in data:
-        print(f"🚨 FACE++ ERROR: {data['error_message']}") # Render Log-la print aagum
-        raise Exception(f"Face++ AI Failed: {data['error_message']}")
-    # ----------------------------------
-
+    print(f"FACEPP DETECT RESPONSE: {data}")
     return [f["face_token"] for f in data.get("faces", [])]
 
 
 def facepp_detect_from_file(file_bytes: bytes) -> list:
-    """Detect face_tokens from uploaded file bytes"""
+    print("Detecting faces from selfie file...")
     res = requests.post(f"{FACEPP_BASE}/detect",
         data={
             "api_key": FACEPP_API_KEY,
@@ -119,11 +106,11 @@ def facepp_detect_from_file(file_bytes: bytes) -> list:
         files={"image_file": ("selfie.jpg", file_bytes, "image/jpeg")}
     )
     data = res.json()
+    print(f"FACEPP SELFIE DETECT: {data}")
     return [f["face_token"] for f in data.get("faces", [])]
 
 
 def facepp_add_to_faceset(faceset_token: str, face_tokens: list):
-    """Add face tokens to a FaceSet"""
     if not face_tokens:
         return
     res = requests.post(f"{FACEPP_BASE}/faceset/addface", data={
@@ -132,11 +119,13 @@ def facepp_add_to_faceset(faceset_token: str, face_tokens: list):
         "faceset_token": faceset_token,
         "face_tokens": ",".join(face_tokens)
     })
-    return res.json()
+    data = res.json()
+    print(f"AddFace response: {data}")
+    return data
 
 
 def facepp_search(faceset_token: str, file_bytes: bytes) -> list:
-    """Search faceset with a selfie, return matched face_tokens"""
+    print(f"Searching faceset: {faceset_token}")
     res = requests.post(f"{FACEPP_BASE}/search",
         data={
             "api_key": FACEPP_API_KEY,
@@ -147,15 +136,12 @@ def facepp_search(faceset_token: str, file_bytes: bytes) -> list:
         files={"image_file": ("selfie.jpg", file_bytes, "image/jpeg")}
     )
     data = res.json()
+    print(f"FACEPP SEARCH RESPONSE: {data}")
     results = data.get("results", [])
-    # confidence > 70 means good match
-    matched = [r["face_token"] for r in results if r.get("confidence", 0) >= 70]
+    matched = [r["face_token"] for r in results if r.get("confidence", 0) >= 60]
     return matched
 
 
-# ─────────────────────────────────────────
-# STUDIO ROUTES
-# ─────────────────────────────────────────
 @app.post("/api/studio/register")
 async def register_studio(
     name: str = Form(...),
@@ -214,9 +200,7 @@ async def create_event(
     client_password: str = Form(...)
 ):
     event_id = f"event_{uuid.uuid4().hex[:8]}"
-    cloudinary_prefix = f"winlensstudio_events/{event_id}"
-
-    # Create Face++ FaceSet for this event
+    cloudinary_prefix = f"todostudio_events/{event_id}"
     faceset_token = facepp_create_faceset(event_id)
 
     conn = sqlite3.connect(DB_FILE)
@@ -236,7 +220,6 @@ async def create_event(
 
 @app.post("/api/studio/upload-photo")
 async def upload_photo(event_id: str = Form(...), file: UploadFile = File(...)):
-    # 1. Get event + studio cloudinary creds
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute('''
@@ -252,7 +235,6 @@ async def upload_photo(event_id: str = Form(...), file: UploadFile = File(...)):
 
     prefix, faceset_token, c_name, a_key, a_secret = row
 
-    # 2. Upload to Cloudinary
     try:
         file_bytes = await file.read()
         result = cloudinary.uploader.upload(
@@ -266,12 +248,12 @@ async def upload_photo(event_id: str = Form(...), file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Cloudinary upload failed: {e}")
 
-    # 3. Detect faces in uploaded photo via Face++
+    faces_count = 0
     try:
         face_tokens = facepp_detect_faces(photo_url)
+        faces_count = len(face_tokens)
         if face_tokens:
             facepp_add_to_faceset(faceset_token, face_tokens)
-            # Save photo_url <-> face_token mapping in DB
             conn = sqlite3.connect(DB_FILE)
             cursor = conn.cursor()
             for ft in face_tokens:
@@ -282,15 +264,11 @@ async def upload_photo(event_id: str = Form(...), file: UploadFile = File(...)):
             conn.commit()
             conn.close()
     except Exception as e:
-        # Don't fail upload if face detection fails
         print(f"Face detection warning: {e}")
 
-    return {"status": "success", "url": photo_url, "faces_detected": len(face_tokens) if 'face_tokens' in locals() else 0}
+    return {"status": "success", "url": photo_url, "faces_detected": faces_count}
 
 
-# ─────────────────────────────────────────
-# CLIENT ROUTES
-# ─────────────────────────────────────────
 @app.post("/api/client/login")
 async def client_login(email: str = Form(...), password: str = Form(...)):
     conn = sqlite3.connect(DB_FILE)
@@ -325,12 +303,8 @@ async def get_all_photos(event_id: str):
     return {"status": "success", "photos": photos}
 
 
-# ─────────────────────────────────────────
-# GUEST FACE SEARCH ROUTE
-# ─────────────────────────────────────────
 @app.post("/api/guest/search")
 async def guest_search(event_id: str = Form(...), selfie: UploadFile = File(...)):
-    # 1. Get faceset_token for this event
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute("SELECT faceset_token FROM events WHERE id=?", (event_id,))
@@ -340,10 +314,8 @@ async def guest_search(event_id: str = Form(...), selfie: UploadFile = File(...)
         raise HTTPException(status_code=404, detail="Event or FaceSet not found")
     faceset_token = row[0]
 
-    # 2. Read selfie bytes
     selfie_bytes = await selfie.read()
 
-    # 3. Search Face++ for matching face tokens
     try:
         matched_face_tokens = facepp_search(faceset_token, selfie_bytes)
     except Exception as e:
@@ -352,7 +324,6 @@ async def guest_search(event_id: str = Form(...), selfie: UploadFile = File(...)
     if not matched_face_tokens:
         return {"status": "success", "photos": []}
 
-    # 4. Find photo URLs for matched face tokens from DB
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     placeholders = ",".join("?" * len(matched_face_tokens))
@@ -363,7 +334,6 @@ async def guest_search(event_id: str = Form(...), selfie: UploadFile = File(...)
     photo_urls = [r[0] for r in cursor.fetchall()]
     conn.close()
 
-    # 5. Return preview + download URLs
     photos = []
     for url in photo_urls:
         download_url = url.replace("/upload/", "/upload/fl_attachment/")
