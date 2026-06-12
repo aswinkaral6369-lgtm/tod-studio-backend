@@ -90,13 +90,14 @@ def facepp_create_faceset(event_id: str) -> str:
 
 
 def facepp_detect_faces(image_url: str) -> list:
-    """Detect all face_tokens in an image URL"""
     res = requests.post(f"{FACEPP_BASE}/detect", data={
         "api_key": FACEPP_API_KEY,
         "api_secret": FACEPP_API_SECRET,
         "image_url": image_url
     })
     data = res.json()
+    print(f"FACEPP DETECT RESPONSE: {data}")  # debug
+    return [f["face_token"] for f in data.get("faces", [])]
 
     # --- PUDHU CODE: ERROR CHECKING ---
     # Face++ ethavathu error anuppirukka nu inga theliva check pannum
