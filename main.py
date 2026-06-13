@@ -24,7 +24,7 @@ app.add_middleware(
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 FACEPP_API_KEY = os.environ.get("FACEPP_API_KEY", "")
 FACEPP_API_SECRET = os.environ.get("FACEPP_API_SECRET", "")
-FACEPP_BASE = "https://api-cn.faceplusplus.com/facepp/v3"
+FACEPP_BASE = "https://api-us.faceplusplus.com/facepp/v3"
 
 def get_db_connection():
     if not DATABASE_URL:
