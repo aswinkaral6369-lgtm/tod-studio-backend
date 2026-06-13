@@ -21,89 +21,178 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+DATABASE_URL = os.environ.get("DATABASE_URL", "")
 FACEPP_API_KEY = os.environ.get("FACEPP_API_KEY", "")
 FACEPP_API_SECRET = os.environ.get("FACEPP_API_SECRET", "")
 FACEPP_BASE = "https://api-us.faceplusplus.com/facepp/v3"
-DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
 def get_db_connection():
+    if not DATABASE_URL:
+        raise Exception("DATABASE_URL is not set!")
     return psycopg2.connect(DATABASE_URL)
 
 def init_db():
-    if not DATABASE_URL: return
+    if not DATABASE_URL:
+        print("Waiting for DATABASE_URL...")
+        return
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute('CREATE TABLE IF NOT EXISTS studios (id TEXT PRIMARY KEY, name TEXT, email TEXT UNIQUE, password TEXT, cloud_name TEXT, api_key TEXT, api_secret TEXT)')
-    cursor.execute('CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY, studio_id TEXT, name TEXT, client_email TEXT UNIQUE, client_password TEXT, cloudinary_prefix TEXT, faceset_token TEXT, FOREIGN KEY(studio_id) REFERENCES studios(id))')
-    cursor.execute('CREATE TABLE IF NOT EXISTS photo_faces (id TEXT PRIMARY KEY, event_id TEXT, photo_url TEXT, face_token TEXT, FOREIGN KEY(event_id) REFERENCES events(id))')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS studios (
+            id TEXT PRIMARY KEY,
+            name TEXT,
+            email TEXT UNIQUE,
+            password TEXT,
+            cloud_name TEXT,
+            api_key TEXT,
+            api_secret TEXT
+        )
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS events (
+            id TEXT PRIMARY KEY,
+            studio_id TEXT,
+            name TEXT,
+            client_email TEXT UNIQUE,
+            client_password TEXT,
+            cloudinary_prefix TEXT,
+            faceset_token TEXT,
+            FOREIGN KEY(studio_id) REFERENCES studios(id)
+        )
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS photo_faces (
+            id TEXT PRIMARY KEY,
+            event_id TEXT,
+            photo_url TEXT,
+            face_token TEXT,
+            FOREIGN KEY(event_id) REFERENCES events(id)
+        )
+    ''')
     conn.commit()
     conn.close()
 
 init_db()
 
-# --- Face++ Helper Functions ---
 def compress_image(file_bytes: bytes, max_bytes: int = 500000) -> bytes:
-    if len(file_bytes) <= max_bytes: return file_bytes
-    img = Image.open(io.BytesIO(file_bytes)).convert("RGB")
-    img.thumbnail((1920, 1920), Image.LANCZOS)
-    quality = 85
-    while quality >= 20:
+    if len(file_bytes) <= max_bytes:
+        return file_bytes
+    try:
+        img = Image.open(io.BytesIO(file_bytes))
+        img = img.convert("RGB")
+        img.thumbnail((1920, 1920), Image.LANCZOS)
+        quality = 85
+        while quality >= 20:
+            output = io.BytesIO()
+            img.save(output, format="JPEG", quality=quality)
+            compressed = output.getvalue()
+            if len(compressed) <= max_bytes:
+                return compressed
+            quality -= 10
+        img.thumbnail((800, 800), Image.LANCZOS)
         output = io.BytesIO()
-        img.save(output, format="JPEG", quality=quality)
-        if output.tell() <= max_bytes: return output.getvalue()
-        quality -= 10
-    return file_bytes
+        img.save(output, format="JPEG", quality=60)
+        return output.getvalue()
+    except Exception as e:
+        print(f"Image compression error: {e}")
+        return file_bytes
 
 def facepp_create_faceset(event_id: str) -> str:
-    res = requests.post(f"{FACEPP_BASE}/faceset/create", data={"api_key": FACEPP_API_KEY, "api_secret": FACEPP_API_SECRET, "outer_id": event_id})
-    return res.json().get("faceset_token")
+    for attempt in range(3):
+        res = requests.post(f"{FACEPP_BASE}/faceset/create", data={
+            "api_key": FACEPP_API_KEY,
+            "api_secret": FACEPP_API_SECRET,
+            "outer_id": event_id,
+            "display_name": event_id
+        })
+        data = res.json()
+        if "faceset_token" in data:
+            return data["faceset_token"]
+        if data.get("error_message") == "CONCURRENCY_LIMIT_EXCEEDED":
+            time.sleep(2)
+            continue
+        break
+    raise HTTPException(status_code=500, detail=f"FaceSet create failed: {data}")
+
+def facepp_detect_faces(image_url: str) -> list:
+    res = requests.post(f"{FACEPP_BASE}/detect", data={
+        "api_key": FACEPP_API_KEY,
+        "api_secret": FACEPP_API_SECRET,
+        "image_url": image_url
+    })
+    data = res.json()
+    return [f["face_token"] for f in data.get("faces", [])]
 
 def facepp_add_to_faceset(faceset_token: str, face_tokens: list):
+    if not face_tokens:
+        return
     for attempt in range(3):
-        res = requests.post(f"{FACEPP_BASE}/faceset/addface", data={"api_key": FACEPP_API_KEY, "api_secret": FACEPP_API_SECRET, "faceset_token": faceset_token, "face_tokens": ",".join(face_tokens)})
-        if "error_message" not in res.json(): return
-        time.sleep(2)
+        res = requests.post(f"{FACEPP_BASE}/faceset/addface", data={
+            "api_key": FACEPP_API_KEY,
+            "api_secret": FACEPP_API_SECRET,
+            "faceset_token": faceset_token,
+            "face_tokens": ",".join(face_tokens)
+        })
+        data = res.json()
+        if "error_message" not in data:
+            return data
+        if data.get("error_message") == "CONCURRENCY_LIMIT_EXCEEDED":
+            time.sleep(2)
+            continue
+        return data
+    return data
 
-# --- Routes ---
+def facepp_search(faceset_token: str, file_bytes: bytes) -> list:
+    file_bytes = compress_image(file_bytes)
+    res = requests.post(
+        f"{FACEPP_BASE}/search",
+        data={
+            "api_key": FACEPP_API_KEY,
+            "api_secret": FACEPP_API_SECRET,
+            "faceset_token": faceset_token,
+            "return_result_count": 5
+        },
+        files={"image_file": ("selfie.jpg", file_bytes, "image/jpeg")}
+    )
+    data = res.json()
+    results = data.get("results", [])
+    matched = [r["face_token"] for r in results if r.get("confidence", 0) >= 60]
+    return matched
+
+# ==========================================
+# STUDIO API ROUTES
+# ==========================================
+
 @app.post("/api/studio/register")
-async def register(name: str=Form(...), email: str=Form(...), password: str=Form(...), cloud_name: str=Form(...), api_key: str=Form(...), api_secret: str=Form(...)):
-    conn = get_db_connection()
-    try:
-        conn.cursor().execute("INSERT INTO studios VALUES (%s, %s, %s, %s, %s, %s, %s)", (f"studio_{uuid.uuid4().hex[:8]}", name, email, password, cloud_name, api_key, api_secret))
-        conn.commit()
-        return {"status": "success"}
-    finally: conn.close()
-
-@app.post("/api/studio/create-event")
-async def create_event(studio_id: str=Form(...), event_name: str=Form(...), client_email: str=Form(...), client_password: str=Form(...)):
-    event_id = f"event_{uuid.uuid4().hex[:8]}"
-    token = facepp_create_faceset(event_id)
-    conn = get_db_connection()
-    conn.cursor().execute("INSERT INTO events VALUES (%s, %s, %s, %s, %s, %s, %s)", (event_id, studio_id, event_name, client_email, client_password, f"todostudio/{event_id}", token))
-    conn.commit()
-    conn.close()
-    return {"status": "success", "event_id": event_id}
-
-@app.post("/api/studio/upload-photo")
-async def upload_photo(event_id: str=Form(...), file: UploadFile=File(...)):
-    # Cloudinary upload + Face Detection logic here
-    return {"status": "success"}
-
-@app.delete("/api/studio/events/{event_id}")
-async def delete_event(event_id: str):
+async def register_studio(
+    name: str = Form(...), email: str = Form(...), password: str = Form(...),
+    cloud_name: str = Form(...), api_key: str = Form(...), api_secret: str = Form(...)
+):
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("DELETE FROM photo_faces WHERE event_id=%s", (event_id,))
-    cursor.execute("DELETE FROM events WHERE id=%s", (event_id,))
-    conn.commit()
+    studio_id = f"studio_{uuid.uuid4().hex[:8]}"
+    try:
+        cursor.execute(
+            "INSERT INTO studios (id, name, email, password, cloud_name, api_key, api_secret) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+            (studio_id, name, email, password, cloud_name, api_key, api_secret)
+        )
+        conn.commit()
+        return {"status": "success", "studio_id": studio_id}
+    except IntegrityError:
+        raise HTTPException(status_code=400, detail="Email already exists")
+    finally:
+        conn.close()
+
+@app.post("/api/studio/login")
+async def studio_login(email: str = Form(...), password: str = Form(...)):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, name FROM studios WHERE email=%s AND password=%s", (email, password))
+    studio = cursor.fetchone()
     conn.close()
-    return {"status": "success"}
-
-@app.post("/api/guest/search")
-async def search(event_id: str=Form(...), selfie: UploadFile=File(...)):
-    # Compression + Face++ Search Logic
-    return {"status": "success", "photos": []}
-
+    if not studio:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    return {"status": "success", "studio_id": studio[0], "studio_name": studio[1]}
 
 @app.get("/api/studio/events/{studio_id}")
 async def get_studio_events(studio_id: str):
@@ -117,13 +206,10 @@ async def get_studio_events(studio_id: str):
         "events": [{"id": e[0], "name": e[1], "client_email": e[2]} for e in events]
     }
 
-
 @app.post("/api/studio/create-event")
 async def create_event(
-    studio_id: str = Form(...),
-    event_name: str = Form(...),
-    client_email: str = Form(...),
-    client_password: str = Form(...)
+    studio_id: str = Form(...), event_name: str = Form(...),
+    client_email: str = Form(...), client_password: str = Form(...)
 ):
     event_id = f"event_{uuid.uuid4().hex[:8]}"
     cloudinary_prefix = f"todostudio_events/{event_id}"
@@ -142,7 +228,6 @@ async def create_event(
         raise HTTPException(status_code=400, detail="Client email already used")
     finally:
         conn.close()
-
 
 @app.post("/api/studio/upload-photo")
 async def upload_photo(event_id: str = Form(...), file: UploadFile = File(...)):
@@ -164,11 +249,7 @@ async def upload_photo(event_id: str = Form(...), file: UploadFile = File(...)):
     try:
         file_bytes = await file.read()
         result = cloudinary.uploader.upload(
-            file_bytes,
-            folder=prefix,
-            cloud_name=c_name,
-            api_key=a_key,
-            api_secret=a_secret
+            file_bytes, folder=prefix, cloud_name=c_name, api_key=a_key, api_secret=a_secret
         )
         photo_url = result.get("secure_url")
     except Exception as e:
@@ -194,7 +275,6 @@ async def upload_photo(event_id: str = Form(...), file: UploadFile = File(...)):
 
     return {"status": "success", "url": photo_url, "faces_detected": faces_count}
 
-
 @app.delete("/api/studio/events/{event_id}")
 async def delete_event(event_id: str):
     conn = get_db_connection()
@@ -208,7 +288,6 @@ async def delete_event(event_id: str):
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         conn.close()
-
 
 # ==========================================
 # CLIENT & GUEST API ROUTES
@@ -228,7 +307,6 @@ async def client_login(email: str = Form(...), password: str = Form(...)):
         raise HTTPException(status_code=401, detail="Invalid credentials")
     return {"status": "success", "event_id": event[0], "event_name": event[1]}
 
-
 @app.get("/api/client/all-photos/{event_id}")
 async def get_all_photos(event_id: str):
     conn = get_db_connection()
@@ -246,7 +324,6 @@ async def get_all_photos(event_id: str):
     resources = cloudinary.api.resources(type="upload", prefix=prefix, max_results=100)
     photos = [r["secure_url"] for r in resources.get("resources", [])]
     return {"status": "success", "photos": photos}
-
 
 @app.post("/api/guest/search")
 async def guest_search(event_id: str = Form(...), selfie: UploadFile = File(...)):
