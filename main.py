@@ -11,6 +11,7 @@ import cloudinary.api
 import cloudinary.uploader
 import psycopg2
 from psycopg2 import IntegrityError
+import razorpay  # <-- PUDHUSA ADD PANNA PACKAGE
 
 app = FastAPI(title="WinLens Backend")
 
@@ -26,6 +27,12 @@ FACEPP_API_KEY = os.environ.get("FACEPP_API_KEY", "")
 FACEPP_API_SECRET = os.environ.get("FACEPP_API_SECRET", "")
 FACEPP_BASE = "https://api-us.faceplusplus.com/facepp/v3"
 
+# --- RAZORPAY SETUP ---
+RAZORPAY_KEY_ID = "rzp_test_T1ZqWInFeOMNz0"
+RAZORPAY_KEY_SECRET = "ADtK8KO7LXqr1W9SzFned5ep"
+razorpay_client = razorpay.Client(auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET))
+# ----------------------
+
 def get_db_connection():
     if not DATABASE_URL:
         raise Exception("DATABASE_URL is not set!")
@@ -37,6 +44,8 @@ def init_db():
         return
     conn = get_db_connection()
     cursor = conn.cursor()
+    
+    # 1. PUDHU COLUMNS ODA TABLE CREATE PANROM (plan_type, photos_uploaded)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS studios (
             id TEXT PRIMARY KEY,
@@ -45,7 +54,9 @@ def init_db():
             password TEXT,
             cloud_name TEXT,
             api_key TEXT,
-            api_secret TEXT
+            api_secret TEXT,
+            plan_type TEXT DEFAULT 'free',
+            photos_uploaded INTEGER DEFAULT 0
         )
     ''')
     cursor.execute('''
@@ -70,6 +81,20 @@ def init_db():
         )
     ''')
     conn.commit()
+
+    # EXISTING DATABASE IRUNTHA INTHA PUDHU COLUMNS-AI AUTO-ADD PANNA SAFETY CODE
+    try:
+        cursor.execute("ALTER TABLE studios ADD COLUMN plan_type TEXT DEFAULT 'free'")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+
+    try:
+        cursor.execute("ALTER TABLE studios ADD COLUMN photos_uploaded INTEGER DEFAULT 0")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+
     conn.close()
 
 init_db()
@@ -173,7 +198,7 @@ async def register_studio(
     studio_id = f"studio_{uuid.uuid4().hex[:8]}"
     try:
         cursor.execute(
-            "INSERT INTO studios (id, name, email, password, cloud_name, api_key, api_secret) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+            "INSERT INTO studios (id, name, email, password, cloud_name, api_key, api_secret, plan_type, photos_uploaded) VALUES (%s, %s, %s, %s, %s, %s, %s, 'free', 0)",
             (studio_id, name, email, password, cloud_name, api_key, api_secret)
         )
         conn.commit()
@@ -229,22 +254,35 @@ async def create_event(
     finally:
         conn.close()
 
+# --- THE GATEKEEPER UPDATE ---
 @app.post("/api/studio/upload-photo")
 async def upload_photo(event_id: str = Form(...), file: UploadFile = File(...)):
     conn = get_db_connection()
     cursor = conn.cursor()
+    
+    # DB la irunthu limits-ai thedi edukirom
     cursor.execute('''
         SELECT e.cloudinary_prefix, e.faceset_token,
-               s.cloud_name, s.api_key, s.api_secret
+               s.cloud_name, s.api_key, s.api_secret,
+               s.id, s.plan_type, s.photos_uploaded
         FROM events e JOIN studios s ON e.studio_id = s.id
         WHERE e.id = %s
     ''', (event_id,))
     row = cursor.fetchone()
     conn.close()
+    
     if not row:
         raise HTTPException(status_code=404, detail="Event not found")
 
-    prefix, faceset_token, c_name, a_key, a_secret = row
+    prefix, faceset_token, c_name, a_key, a_secret, studio_id, plan_type, photos_uploaded = row
+    
+    # --- SUBSCRIPTION LIMIT LOGIC ---
+    current_plan = plan_type or "free"
+    current_photos = photos_uploaded or 0
+    
+    if current_plan == "free" and current_photos >= 100:
+        raise HTTPException(status_code=403, detail="FREE_LIMIT_REACHED")
+    # --------------------------------
 
     try:
         file_bytes = await file.read()
@@ -261,6 +299,7 @@ async def upload_photo(event_id: str = Form(...), file: UploadFile = File(...)):
         faces_count = len(face_tokens)
         if face_tokens:
             facepp_add_to_faceset(faceset_token, face_tokens)
+            
             conn = get_db_connection()
             cursor = conn.cursor()
             for ft in face_tokens:
@@ -272,6 +311,17 @@ async def upload_photo(event_id: str = Form(...), file: UploadFile = File(...)):
             conn.close()
     except Exception as e:
         print(f"Face detection warning: {e}")
+
+    # --- UPLOAD SUCCESS AANA PIRAGU COUNT INCREASE PANROM ---
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("UPDATE studios SET photos_uploaded = photos_uploaded + 1 WHERE id = %s", (studio_id,))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"Count update error: {e}")
+    # --------------------------------------------------------
 
     return {"status": "success", "url": photo_url, "faces_detected": faces_count}
 
@@ -288,6 +338,29 @@ async def delete_event(event_id: str):
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         conn.close()
+
+# --- NEW RAZORPAY PAYMENT ROUTE ---
+@app.post("/api/studio/create-order")
+async def create_payment_order(plan_type: str = Form(default="monthly")):
+    # Plan poruthu amount set panrom (Paise format-la)
+    if plan_type == "yearly":
+        amount = 699900  # ₹6999
+    else:
+        amount = 69900   # ₹699
+        
+    order_data = {
+        "amount": amount,
+        "currency": "INR",
+        "receipt": f"rcpt_{uuid.uuid4().hex[:8]}",
+        "payment_capture": 1 # Auto capture
+    }
+    try:
+        payment_order = razorpay_client.order.create(data=order_data)
+        return {"status": "success", "order_id": payment_order["id"], "amount": amount}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Razorpay Error: {str(e)}")
+# ----------------------------------
+
 
 # ==========================================
 # CLIENT & GUEST API ROUTES
