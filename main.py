@@ -187,19 +187,22 @@ def facepp_search(faceset_token: str, file_bytes: bytes) -> list:
 # ==========================================
 # STUDIO API ROUTES
 # ==========================================
+DEVELOPER_CODE = "811022104005"
 
 @app.post("/api/studio/register")
 async def register_studio(
     name: str = Form(...), email: str = Form(...), password: str = Form(...),
-    cloud_name: str = Form(...), api_key: str = Form(...), api_secret: str = Form(...)
+    cloud_name: str = Form(...), api_key: str = Form(...), api_secret: str = Form(...),
+    developer_code: str = Form(default="")
 ):
+    plan = "pro" if developer_code == DEVELOPER_CODE else "free"
     conn = get_db_connection()
     cursor = conn.cursor()
     studio_id = f"studio_{uuid.uuid4().hex[:8]}"
     try:
         cursor.execute(
-            "INSERT INTO studios (id, name, email, password, cloud_name, api_key, api_secret, plan_type, photos_uploaded) VALUES (%s, %s, %s, %s, %s, %s, %s, 'free', 0)",
-            (studio_id, name, email, password, cloud_name, api_key, api_secret)
+            "INSERT INTO studios (id, name, email, password, cloud_name, api_key, api_secret, plan_type, photos_uploaded) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 0)",
+            (studio_id, name, email, password, cloud_name, api_key, api_secret, plan)
         )
         conn.commit()
         return {"status": "success", "studio_id": studio_id}
