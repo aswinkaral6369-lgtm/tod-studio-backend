@@ -28,8 +28,8 @@ FACEPP_API_SECRET = os.environ.get("FACEPP_API_SECRET", "")
 FACEPP_BASE = "https://api-us.faceplusplus.com/facepp/v3"
 
 # --- RAZORPAY SETUP ---
-RAZORPAY_KEY_ID = "rzp_test_T1ZqWInFeOMNz0"
-RAZORPAY_KEY_SECRET = "ADtK8KO7LXqr1W9SzFned5ep"
+RAZORPAY_KEY_ID = "rzp_test_T1d8OCHmUHbQkF"
+RAZORPAY_KEY_SECRET = "eRsUCjpYfK7aJRjNuvltpnkc"
 razorpay_client = razorpay.Client(auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET))
 # ----------------------
 
