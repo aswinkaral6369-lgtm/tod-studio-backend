@@ -5,4 +5,5 @@ requests==2.31.0
 cloudinary==1.40.0
 Pillow
 psycopg2-binary==2.9.9
+setuptools
 razorpay==1.4.1
