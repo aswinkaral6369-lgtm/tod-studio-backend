@@ -187,7 +187,7 @@ def facepp_search(faceset_token: str, file_bytes: bytes) -> list:
 # ==========================================
 # STUDIO API ROUTES
 # ==========================================
-DEVELOPER_CODE = "811022104005"
+DEVELOPER_CODE = os.environ.get("DEVELOPER_CODE", "")
 
 @app.post("/api/studio/register")
 async def register_studio(
@@ -368,6 +368,29 @@ async def create_payment_order(plan_type: str = Form(default="monthly")):
 # ==========================================
 # CLIENT & GUEST API ROUTES
 # ==========================================
+@app.post("/api/studio/verify-payment")
+async def verify_payment(
+    razorpay_order_id: str = Form(...),
+    razorpay_payment_id: str = Form(...),
+    razorpay_signature: str = Form(...),
+    studio_id: str = Form(...)
+):
+    try:
+        razorpay_client.utility.verify_payment_signature({
+            'razorpay_order_id': razorpay_order_id,
+            'razorpay_payment_id': razorpay_payment_id,
+            'razorpay_signature': razorpay_signature
+        })
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid payment signature")
+    
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE studios SET plan_type = 'pro' WHERE id = %s", (studio_id,))
+    conn.commit()
+    conn.close()
+    
+    return {"status": "success", "message": "Upgraded to Pro!"}
 
 @app.post("/api/client/login")
 async def client_login(email: str = Form(...), password: str = Form(...)):
