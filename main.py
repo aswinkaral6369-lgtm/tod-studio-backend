@@ -215,12 +215,12 @@ async def register_studio(
 async def studio_login(email: str = Form(...), password: str = Form(...)):
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT id, name FROM studios WHERE email=%s AND password=%s", (email, password))
+    cursor.execute("SELECT id, name, plan_type FROM studios WHERE email=%s AND password=%s", (email, password))
     studio = cursor.fetchone()
     conn.close()
     if not studio:
         raise HTTPException(status_code=401, detail="Invalid credentials")
-    return {"status": "success", "studio_id": studio[0], "studio_name": studio[1]}
+    return {"status": "success", "studio_id": studio[0], "studio_name": studio[1], "plan_type": studio[2]}
 
 @app.get("/api/studio/events/{studio_id}")
 async def get_studio_events(studio_id: str):
