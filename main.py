@@ -328,6 +328,53 @@ async def upload_photo(event_id: str = Form(...), file: UploadFile = File(...)):
 
     return {"status": "success", "url": photo_url, "faces_detected": faces_count}
 
+
+# --- NEW DELETE PHOTO ROUTE ---
+@app.post("/api/studio/delete-photo")
+async def delete_single_photo(event_id: str = Form(...), photo_url: str = Form(...)):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        # 1. Cloudinary credentials edukkirom
+        cursor.execute('''
+            SELECT e.cloudinary_prefix, s.cloud_name, s.api_key, s.api_secret, s.id 
+            FROM events e JOIN studios s ON e.studio_id = s.id 
+            WHERE e.id = %s
+        ''', (event_id,))
+        row = cursor.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Event not found")
+        
+        prefix, c_name, a_key, a_secret, studio_id = row
+        
+        # 2. Cloudinary-la irunthu delete panna public_id venum (URL la irunthu edukkirom)
+        start_index = photo_url.find(prefix)
+        if start_index == -1:
+            raise HTTPException(status_code=400, detail="Invalid photo URL for this event")
+        
+        public_id = photo_url[start_index:].rsplit('.', 1)[0]
+        
+        # 3. Cloudinary-la irunthu image-ai direct ah delete panrom
+        cloudinary.config(cloud_name=c_name, api_key=a_key, api_secret=a_secret)
+        cloudinary.uploader.destroy(public_id)
+        
+        # 4. Database-la irunthu antha photo entry and faces-ai delete panrom
+        cursor.execute("DELETE FROM photo_faces WHERE photo_url=%s", (photo_url,))
+        
+        # 5. Studio count-ai 1 kuraikirom (0-kku keezha pogaama paathukurom)
+        cursor.execute("UPDATE studios SET photos_uploaded = GREATEST(photos_uploaded - 1, 0) WHERE id = %s", (studio_id,))
+        
+        conn.commit()
+        return {"status": "success", "message": "Photo deleted successfully"}
+        
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=f"Delete failed: {str(e)}")
+    finally:
+        conn.close()
+# ------------------------------
+
+
 @app.delete("/api/studio/events/{event_id}")
 async def delete_event(event_id: str):
     conn = get_db_connection()
